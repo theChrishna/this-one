@@ -1,0 +1,4 @@
+BarTidy.app/
+*.dSYM/
+.DS_Store
+build/
