@@ -13,6 +13,14 @@ import os
 // Hiding works by making a separator very wide: the menu bar has no room for
 // the items on its left, so they are pushed out of view. Expanding shrinks it.
 // Cmd-drag icons in the menu bar to choose which zone they live in.
+//
+// macOS 27 note: status items are laid out by the new MenuBarAgent, which moves
+// items that don't fit into its own overflow group instead of off-screen, and
+// silently drops any single item wider than roughly half the screen. The classic
+// 10,000pt separator is therefore thrown away and hides nothing. Instead we use
+// the widest length MenuBarAgent still accepts (see `hidingLength`): the separator
+// can't fit, so it and everything to its left go into the overflow group, which
+// is not shown when the group is that wide.
 
 // MARK: - Preferences
 
@@ -41,6 +49,11 @@ enum Pref {
         get { d.bool(forKey: "showSeparator") }
         set { d.set(newValue, forKey: "showSeparator") }
     }
+    /// Hiding widths that MenuBarAgent accepted, keyed by screen width in points.
+    static var learnedHidingLengths: [String: CGFloat] {
+        get { (d.dictionary(forKey: "learnedHidingLengths") as? [String: Double])?.mapValues { CGFloat($0) } ?? [:] }
+        set { d.set(newValue.mapValues { Double($0) }, forKey: "learnedHidingLengths") }
+    }
     /// `defaults write com.krishna.bartidy debugLogging -bool YES`
     static var debugLogging: Bool { d.bool(forKey: "debugLogging") }
 }
@@ -49,7 +62,8 @@ private let logger = Logger(subsystem: "com.krishna.bartidy", category: "bar")
 
 func debugLog(_ message: @autoclosure () -> String) {
     guard Pref.debugLogging else { return }
-    let m = message()
+    let t = Date().formatted(.dateTime.hour().minute().second().secondFraction(.fractional(3)))
+    let m = "\(t) " + message()
     logger.info("\(m, privacy: .public)")
     FileHandle.standardError.write(Data((m + "\n").utf8))
 }
@@ -97,8 +111,8 @@ enum Icons {
 final class MenuBarController: NSObject {
     enum State: String { case collapsed, expanded, expandedAll }
 
-    /// How wide a separator becomes to push the items on its left out of view.
-    static let hidingLength: CGFloat = 10_000
+    /// Classic hiding width, still right for macOS 26 and earlier.
+    static let legacyHidingLength: CGFloat = 10_000
     /// Width of the separator when "Show separator" is off (still draggable).
     static let invisibleSeparatorLength: CGFloat = 8
 
@@ -109,6 +123,7 @@ final class MenuBarController: NSObject {
     private(set) var state: State = .expanded
     private var collapseTimer: Timer?
     private var warnedAboutOrder = false
+    private var verifyWork: DispatchWorkItem?
     var onShowPreferences: (() -> Void)?
 
     override init() {
@@ -138,6 +153,56 @@ final class MenuBarController: NSObject {
 
         alwaysHiddenSeparator.isVisible = Pref.alwaysHiddenEnabled
         render()
+
+        // Display arrangement or resolution changes alter the usable hiding width.
+        NotificationCenter.default.addObserver(
+            forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { self?.render() }
+        }
+    }
+
+    // MARK: Hiding width (macOS 27)
+
+    /// Width that hides everything left of a separator on the toggle's screen.
+    var hidingLength: CGFloat {
+        guard #available(macOS 27, *) else { return Self.legacyHidingLength }
+        let width = screenWidth
+        if let learned = Pref.learnedHidingLengths[Self.key(width)] { return learned }
+        // Measured on macOS 27.2: 1920pt screen accepts <= 935, rejects >= 950.
+        return floor(width / 2 - 28)
+    }
+
+    private var screenWidth: CGFloat {
+        (toggle.button?.window?.screen ?? NSScreen.main)?.frame.width ?? 1440
+    }
+
+    private static func key(_ width: CGFloat) -> String { String(Int(width)) }
+
+    /// After collapsing, MenuBarAgent either overflows the separator (its window
+    /// stops being visible) or rejects the length (window stays "visible" and the
+    /// icons stay put). On rejection, shrink and remember what works for this screen.
+    private func verifyCollapse(attempt: Int = 0) {
+        verifyWork?.cancel()
+        guard #available(macOS 27, *) else { return }
+        let work = DispatchWorkItem { [weak self] in
+            guard let self, self.state == .collapsed,
+                  let w = self.separator.button?.window else { return }
+            let rejected = w.occlusionState.contains(.visible)
+            debugLog("verify collapse: length=\(self.separator.length) rejected=\(rejected)")
+            guard rejected else { return }
+            let width = self.screenWidth
+            let shrunk = floor(self.separator.length * 0.92)
+            guard shrunk >= width * 0.3, attempt < 6 else {
+                debugLog("verify collapse: giving up at \(self.separator.length)")
+                return
+            }
+            Pref.learnedHidingLengths[Self.key(width)] = shrunk
+            self.render()
+            self.verifyCollapse(attempt: attempt + 1)
+        }
+        verifyWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6, execute: work)
     }
 
     /// Collapse once the menu bar has laid our items out (frames are zero until then).
@@ -187,6 +252,7 @@ final class MenuBarController: NSObject {
     // MARK: State
 
     func apply(_ requested: State, userInitiated: Bool) {
+        debugLog("apply \(requested.rawValue) user=\(userInitiated) from=\(state.rawValue)")
         var target = requested
         if target == .expandedAll && !Pref.alwaysHiddenEnabled { target = .expanded }
 
@@ -199,9 +265,11 @@ final class MenuBarController: NSObject {
             if state == .expanded { scheduleAutoCollapse(); return }
         }
 
+        let wasCollapsed = state == .collapsed
         state = target
         render()
         scheduleAutoCollapse()
+        if state == .collapsed && !wasCollapsed { verifyCollapse() }
     }
 
     /// Re-applies preferences (separator visibility, always-hidden zone).
@@ -219,7 +287,7 @@ final class MenuBarController: NSObject {
         switch state {
         case .collapsed:
             separator.button?.image = nil
-            separator.length = Self.hidingLength
+            separator.length = hidingLength
             toggle.button?.image = Icons.collapsed
         case .expanded, .expandedAll:
             if Pref.showSeparator {
@@ -235,7 +303,7 @@ final class MenuBarController: NSObject {
         if Pref.alwaysHiddenEnabled {
             if state == .collapsed || hideAlwaysHiddenZone {
                 alwaysHiddenSeparator.button?.image = nil
-                alwaysHiddenSeparator.length = Self.hidingLength
+                alwaysHiddenSeparator.length = hidingLength
             } else {
                 alwaysHiddenSeparator.button?.image = Pref.showSeparator ? Icons.alwaysHiddenSeparator : nil
                 alwaysHiddenSeparator.length = Pref.showSeparator ? NSStatusItem.variableLength : Self.invisibleSeparatorLength
@@ -501,6 +569,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             DistributedNotificationCenter.default().addObserver(
                 forName: .init("com.krishna.bartidy.toggle"), object: nil, queue: .main
             ) { [weak self] _ in self?.bar.toggleHidden() }
+            DistributedNotificationCenter.default().addObserver(
+                forName: .init("com.krishna.bartidy.debugLength"), object: nil, queue: .main
+            ) { [weak self] n in
+                guard let self, let l = Double(n.object as? String ?? "") else { return }
+                self.bar.separator.button?.image = nil
+                self.bar.separator.length = l
+                self.bar.dumpFrames("debugLength \(l)")
+            }
         }
 
         bar.collapseWhenReady()
