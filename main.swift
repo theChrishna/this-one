@@ -574,9 +574,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             DistributedNotificationCenter.default().addObserver(
                 forName: .init("com.krishna.bartidy.debugLength"), object: nil, queue: .main
             ) { [weak self] n in
-                guard let self, let l = Double(n.object as? String ?? "") else { return }
-                self.bar.separator.button?.image = nil
-                self.bar.separator.length = l
+                // object: "<length>" for the separator, "ah:<length>" for the always-hidden one
+                guard let self, let arg = n.object as? String else { return }
+                let isAH = arg.hasPrefix("ah:")
+                guard let l = Double(isAH ? String(arg.dropFirst(3)) : arg) else { return }
+                let item = isAH ? self.bar.alwaysHiddenSeparator : self.bar.separator
+                item.button?.image = nil
+                item.length = l
                 self.bar.dumpFrames("debugLength \(l)")
             }
             DistributedNotificationCenter.default().addObserver(
@@ -585,6 +589,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 let on = (n.object as? String) == "on"
                 do { try LoginItem.set(on) } catch { debugLog("login item error: \(error)") }
                 debugLog("login item set \(on) -> status \(SMAppService.mainApp.status.rawValue) enabled=\(LoginItem.isEnabled) needsApproval=\(LoginItem.needsApproval)")
+            }
+            DistributedNotificationCenter.default().addObserver(
+                forName: .init("com.krishna.bartidy.debugState"), object: nil, queue: .main
+            ) { [weak self] n in
+                if let st = MenuBarController.State(rawValue: n.object as? String ?? "") {
+                    self?.bar.apply(st, userInitiated: true)
+                }
             }
             DistributedNotificationCenter.default().addObserver(
                 forName: .init("com.krishna.bartidy.debugSnapshot"), object: nil, queue: .main
