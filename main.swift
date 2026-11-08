@@ -438,6 +438,7 @@ final class PreferencesWindowController: NSWindowController, NSWindowDelegate {
     private let alwaysHiddenBox = NSButton(checkboxWithTitle: "Enable always-hidden section", target: nil, action: nil)
     private let separatorBox = NSButton(checkboxWithTitle: "Show separator icons", target: nil, action: nil)
     private let delayPopup = NSPopUpButton()
+    private var stack: NSStackView?
     private static let delays: [(String, Double)] = [
         ("Never", 0), ("5 seconds", 5), ("10 seconds", 10), ("15 seconds", 15),
         ("30 seconds", 30), ("1 minute", 60), ("5 minutes", 300),
@@ -477,12 +478,28 @@ final class PreferencesWindowController: NSWindowController, NSWindowDelegate {
         help.textColor = .secondaryLabelColor
         help.preferredMaxLayoutWidth = 372
 
-        let stack = NSStackView(views: [loginBox, loginNote, alwaysHiddenBox, separatorBox, delayRow, help])
+        // Footer: version on the left, Quit on the right.
+        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? ""
+        let versionLabel = NSTextField(labelWithString: "BarTidy \(version)")
+        versionLabel.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+        versionLabel.textColor = .tertiaryLabelColor
+        let quitButton = NSButton(title: "Quit BarTidy", target: NSApp, action: #selector(NSApplication.terminate(_:)))
+        quitButton.keyEquivalent = "q"
+        quitButton.keyEquivalentModifierMask = .command
+        let spacer = NSView()
+        spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        let footer = NSStackView(views: [versionLabel, spacer, quitButton])
+        footer.orientation = .horizontal
+        footer.translatesAutoresizingMaskIntoConstraints = false
+
+        let stack = NSStackView(views: [loginBox, loginNote, alwaysHiddenBox, separatorBox, delayRow, help, footer])
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 10
-        stack.setCustomSpacing(2, after: loginBox)
         stack.setCustomSpacing(18, after: delayRow)
+        stack.setCustomSpacing(18, after: help)
+        footer.widthAnchor.constraint(equalToConstant: 372).isActive = true
+        self.stack = stack
         stack.edgeInsets = NSEdgeInsets(top: 20, left: 24, bottom: 20, right: 24)
         stack.translatesAutoresizingMaskIntoConstraints = false
 
@@ -506,6 +523,8 @@ final class PreferencesWindowController: NSWindowController, NSWindowDelegate {
             ? "Waiting for approval in System Settings › General › Login Items."
             : ""
         loginNote.isHidden = loginNote.stringValue.isEmpty
+        // Keep the note tucked under its checkbox, but normal spacing when it's hidden.
+        stack?.setCustomSpacing(loginNote.isHidden ? 10 : 2, after: loginBox)
         alwaysHiddenBox.state = Pref.alwaysHiddenEnabled ? .on : .off
         separatorBox.state = Pref.showSeparator ? .on : .off
         let delay = Pref.autoCollapseDelay
