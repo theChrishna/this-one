@@ -1,118 +1,520 @@
 import Cocoa
+import Carbon.HIToolbox
 import ServiceManagement
+import os
 
-// BarTidy: a minimal Hidden Bar style menu bar decluttering app.
+// BarTidy: a minimal Hidden Bar style menu bar declutterer.
 //
-// How it works: two status items sit in the menu bar.
-//   [ icons you want hidden ]  |  [ icons you keep ]  ‹  (system icons)
-//                              ^separator            ^toggle
-// Collapsing makes the separator 10,000pt wide, which pushes every item to its
-// left off the edge of the screen. Expanding shrinks it back.
-// Cmd-drag the icons in the menu bar to choose which side of the separator they sit on.
+// Three status items sit in the menu bar (right side shown):
+//
+//   [ always hidden ]  ┊  [ hidden ]  |  [ always shown ]  ‹   (system items)
+//                      ^alwaysHidden  ^separator            ^toggle
+//
+// Hiding works by making a separator very wide: the menu bar has no room for
+// the items on its left, so they are pushed out of view. Expanding shrinks it.
+// Cmd-drag icons in the menu bar to choose which zone they live in.
 
-final class AppDelegate: NSObject, NSApplicationDelegate {
-    private let toggleItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-    private let separatorItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+// MARK: - Preferences
 
-    private let normalLength: CGFloat = 16
-    private let collapsedLength: CGFloat = 10_000
-    private let autoCollapseDelay: TimeInterval = 15
+enum Pref {
+    private static let d = UserDefaults.standard
 
-    private var isCollapsed = false
-    private var autoCollapseTimer: Timer?
+    static func registerDefaults() {
+        d.register(defaults: [
+            "autoCollapseDelay": 10.0,
+            "alwaysHiddenEnabled": false,
+            "showSeparator": true,
+            "debugLogging": false,
+        ])
+    }
 
-    func applicationDidFinishLaunching(_ notification: Notification) {
-        // Stable names so macOS remembers the positions between launches.
-        toggleItem.autosaveName = "bartidy.toggle"
-        separatorItem.autosaveName = "bartidy.separator"
+    /// Seconds before the hidden zone collapses again. 0 = never.
+    static var autoCollapseDelay: Double {
+        get { d.double(forKey: "autoCollapseDelay") }
+        set { d.set(newValue, forKey: "autoCollapseDelay") }
+    }
+    static var alwaysHiddenEnabled: Bool {
+        get { d.bool(forKey: "alwaysHiddenEnabled") }
+        set { d.set(newValue, forKey: "alwaysHiddenEnabled") }
+    }
+    static var showSeparator: Bool {
+        get { d.bool(forKey: "showSeparator") }
+        set { d.set(newValue, forKey: "showSeparator") }
+    }
+    /// `defaults write com.krishna.bartidy debugLogging -bool YES`
+    static var debugLogging: Bool { d.bool(forKey: "debugLogging") }
+}
 
-        if let button = toggleItem.button {
-            button.target = self
-            button.action = #selector(toggleClicked(_:))
-            button.sendAction(on: [.leftMouseUp, .rightMouseUp])
+private let logger = Logger(subsystem: "com.krishna.bartidy", category: "bar")
+
+func debugLog(_ message: @autoclosure () -> String) {
+    guard Pref.debugLogging else { return }
+    let m = message()
+    logger.info("\(m, privacy: .public)")
+    FileHandle.standardError.write(Data((m + "\n").utf8))
+}
+
+// MARK: - Menu bar icons (template images, so they follow light/dark/tinted menu bars)
+
+enum Icons {
+    static func symbol(_ name: String, _ description: String) -> NSImage? {
+        let config = NSImage.SymbolConfiguration(pointSize: 13, weight: .semibold)
+        let img = NSImage(systemSymbolName: name, accessibilityDescription: description)?
+            .withSymbolConfiguration(config)
+        img?.isTemplate = true
+        return img
+    }
+
+    static let collapsed = symbol("chevron.left", "Show hidden menu bar items")
+    static let expanded = symbol("chevron.right", "Hide menu bar items")
+
+    /// A thin solid vertical line.
+    static let separator: NSImage = line(dashed: false)
+    /// A dotted vertical line marking the always-hidden zone.
+    static let alwaysHiddenSeparator: NSImage = line(dashed: true)
+
+    private static func line(dashed: Bool) -> NSImage {
+        let img = NSImage(size: NSSize(width: 8, height: 16), flipped: false) { rect in
+            NSColor.black.setFill()
+            if dashed {
+                var y: CGFloat = 1
+                while y < rect.height - 1 {
+                    NSBezierPath(roundedRect: NSRect(x: 3, y: y, width: 2, height: 2), xRadius: 1, yRadius: 1).fill()
+                    y += 4
+                }
+            } else {
+                NSBezierPath(roundedRect: NSRect(x: 3, y: 1, width: 2, height: 14), xRadius: 1, yRadius: 1).fill()
+            }
+            return true
         }
-        separatorItem.menu = nil
-        applyState(collapsed: false)
-        // Start collapsed shortly after launch so the bar is tidy by default.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
-            self?.applyState(collapsed: true)
+        img.isTemplate = true
+        return img
+    }
+}
+
+// MARK: - Status items
+
+final class MenuBarController: NSObject {
+    enum State: String { case collapsed, expanded, expandedAll }
+
+    /// How wide a separator becomes to push the items on its left out of view.
+    static let hidingLength: CGFloat = 10_000
+    /// Width of the separator when "Show separator" is off (still draggable).
+    static let invisibleSeparatorLength: CGFloat = 8
+
+    let toggle: NSStatusItem
+    let separator: NSStatusItem
+    let alwaysHiddenSeparator: NSStatusItem
+
+    private(set) var state: State = .expanded
+    private var collapseTimer: Timer?
+    private var warnedAboutOrder = false
+    var onShowPreferences: (() -> Void)?
+
+    override init() {
+        // New status items appear to the left of existing ones, so creating them
+        // right-to-left gives the right default order on first launch. After that
+        // autosaveName restores wherever the user dragged them.
+        let bar = NSStatusBar.system
+        toggle = bar.statusItem(withLength: NSStatusItem.variableLength)
+        toggle.autosaveName = "bartidy.toggle"
+        separator = bar.statusItem(withLength: NSStatusItem.variableLength)
+        separator.autosaveName = "bartidy.separator"
+        alwaysHiddenSeparator = bar.statusItem(withLength: NSStatusItem.variableLength)
+        alwaysHiddenSeparator.autosaveName = "bartidy.alwaysHidden"
+        super.init()
+
+        if let b = toggle.button {
+            b.target = self
+            b.action = #selector(toggleClicked(_:))
+            b.sendAction(on: [.leftMouseUp, .rightMouseUp])
+            b.setAccessibilityLabel("BarTidy")
+            b.toolTip = "Click: show/hide • ⌥-click: also always-hidden • Right-click: menu • ⌃⌥B"
+        }
+        separator.button?.image = Icons.separator
+        separator.button?.setAccessibilityLabel("BarTidy separator")
+        alwaysHiddenSeparator.button?.image = Icons.alwaysHiddenSeparator
+        alwaysHiddenSeparator.button?.setAccessibilityLabel("BarTidy always-hidden separator")
+
+        alwaysHiddenSeparator.isVisible = Pref.alwaysHiddenEnabled
+        render()
+    }
+
+    /// Collapse once the menu bar has laid our items out (frames are zero until then).
+    func collapseWhenReady(attempt: Int = 0) {
+        if frameX(toggle) != nil && frameX(separator) != nil {
+            apply(.collapsed, userInitiated: false)
+        } else if attempt < 20 {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
+                self?.collapseWhenReady(attempt: attempt + 1)
+            }
         }
     }
 
-    // MARK: - Actions
+    // MARK: Actions
 
     @objc private func toggleClicked(_ sender: NSStatusBarButton) {
         guard let event = NSApp.currentEvent else { return }
         if event.type == .rightMouseUp || event.modifierFlags.contains(.control) {
             showMenu()
+        } else if event.modifierFlags.contains(.option) {
+            apply(state == .expandedAll ? .collapsed : .expandedAll, userInitiated: true)
         } else {
-            applyState(collapsed: !isCollapsed)
+            apply(state == .collapsed ? .expanded : .collapsed, userInitiated: true)
         }
+    }
+
+    /// Global hotkey and other non-click toggles.
+    func toggleHidden() {
+        apply(state == .collapsed ? .expanded : .collapsed, userInitiated: true)
     }
 
     private func showMenu() {
         let menu = NSMenu()
-        let login = NSMenuItem(title: "Launch at Login", action: #selector(toggleLogin), keyEquivalent: "")
-        login.target = self
-        login.state = SMAppService.mainApp.status == .enabled ? .on : .off
-        menu.addItem(login)
+        let prefs = NSMenuItem(title: "Preferences…", action: #selector(openPreferences), keyEquivalent: ",")
+        prefs.target = self
+        menu.addItem(prefs)
         menu.addItem(.separator())
-        let quit = NSMenuItem(title: "Quit BarTidy", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
-        menu.addItem(quit)
-        toggleItem.menu = menu
-        toggleItem.button?.performClick(nil)
-        toggleItem.menu = nil   // so left-click keeps toggling
+        menu.addItem(NSMenuItem(title: "Quit BarTidy", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
+        // Attach the menu only for this click so a normal left-click keeps toggling.
+        toggle.menu = menu
+        toggle.button?.performClick(nil)
+        toggle.menu = nil
     }
 
-    @objc private func toggleLogin() {
-        do {
-            if SMAppService.mainApp.status == .enabled {
-                try SMAppService.mainApp.unregister()
+    @objc private func openPreferences() { onShowPreferences?() }
+
+    // MARK: State
+
+    func apply(_ requested: State, userInitiated: Bool) {
+        var target = requested
+        if target == .expandedAll && !Pref.alwaysHiddenEnabled { target = .expanded }
+
+        // Collapsing with the separator on the wrong side of the toggle would hide
+        // the toggle itself (and the user would lose the app). Refuse instead.
+        if target == .collapsed && !isLeft(separator, of: toggle) {
+            debugLog("refusing to collapse: separator is right of toggle")
+            if userInitiated { warnWrongOrder() }
+            target = .expanded
+            if state == .expanded { scheduleAutoCollapse(); return }
+        }
+
+        state = target
+        render()
+        scheduleAutoCollapse()
+    }
+
+    /// Re-applies preferences (separator visibility, always-hidden zone).
+    func preferencesChanged() {
+        alwaysHiddenSeparator.isVisible = Pref.alwaysHiddenEnabled
+        if state == .expandedAll && !Pref.alwaysHiddenEnabled { state = .expanded }
+        render()
+        scheduleAutoCollapse()
+    }
+
+    private func render() {
+        let hideAlwaysHiddenZone = Pref.alwaysHiddenEnabled && state != .expandedAll
+            && isLeft(alwaysHiddenSeparator, of: separator)
+
+        switch state {
+        case .collapsed:
+            separator.button?.image = nil
+            separator.length = Self.hidingLength
+            toggle.button?.image = Icons.collapsed
+        case .expanded, .expandedAll:
+            if Pref.showSeparator {
+                separator.button?.image = Icons.separator
+                separator.length = NSStatusItem.variableLength
             } else {
-                try SMAppService.mainApp.register()
+                separator.button?.image = nil
+                separator.length = Self.invisibleSeparatorLength
             }
-        } catch {
-            NSLog("BarTidy: launch at login failed: \(error)")
+            toggle.button?.image = Icons.expanded
+        }
+
+        if Pref.alwaysHiddenEnabled {
+            if state == .collapsed || hideAlwaysHiddenZone {
+                alwaysHiddenSeparator.button?.image = nil
+                alwaysHiddenSeparator.length = Self.hidingLength
+            } else {
+                alwaysHiddenSeparator.button?.image = Pref.showSeparator ? Icons.alwaysHiddenSeparator : nil
+                alwaysHiddenSeparator.length = Pref.showSeparator ? NSStatusItem.variableLength : Self.invisibleSeparatorLength
+            }
+        }
+        debugLog("render state=\(state.rawValue)")
+        dumpFrames("render")
+    }
+
+    private func scheduleAutoCollapse() {
+        collapseTimer?.invalidate()
+        collapseTimer = nil
+        let delay = Pref.autoCollapseDelay
+        guard state != .collapsed, delay > 0 else { return }
+        collapseTimer = Timer.scheduledTimer(withTimeInterval: delay, repeats: false) { [weak self] _ in
+            self?.autoCollapse()
         }
     }
 
-    // MARK: - State
-
-    private func applyState(collapsed: Bool) {
-        // Safety: if the user dragged the separator to the right of the toggle,
-        // collapsing would hide the toggle itself. Refuse in that case.
-        if collapsed, !separatorIsLeftOfToggle() {
-            NSSound.beep()
+    private func autoCollapse() {
+        // Don't yank icons away while the pointer is in the menu bar (e.g. the user is
+        // about to click a revealed icon, or one of its menus is open).
+        if mouseIsInMenuBar() {
+            collapseTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: false) { [weak self] _ in
+                self?.autoCollapse()
+            }
             return
         }
+        apply(.collapsed, userInitiated: false)
+    }
 
-        isCollapsed = collapsed
-        autoCollapseTimer?.invalidate()
+    private func mouseIsInMenuBar() -> Bool {
+        let p = NSEvent.mouseLocation
+        guard let screen = NSScreen.screens.first(where: { NSMouseInRect(p, $0.frame, false) }) else { return false }
+        let barHeight = max(NSStatusBar.system.thickness, screen.frame.maxY - screen.visibleFrame.maxY, screen.safeAreaInsets.top)
+        return p.y >= screen.frame.maxY - barHeight - 1
+    }
 
-        if collapsed {
-            separatorItem.length = collapsedLength
-            separatorItem.button?.image = nil
-            toggleItem.button?.image = symbol("chevron.left")
-        } else {
-            separatorItem.length = normalLength
-            separatorItem.button?.image = symbol("line.diagonal")
-            toggleItem.button?.image = symbol("chevron.right")
-            autoCollapseTimer = Timer.scheduledTimer(withTimeInterval: autoCollapseDelay, repeats: false) { [weak self] _ in
-                self?.applyState(collapsed: true)
-            }
+    // MARK: Order guard
+
+    /// The item's x position relative to its screen, or nil if it isn't laid out yet.
+    private func frameX(_ item: NSStatusItem) -> CGFloat? {
+        guard item.isVisible, let w = item.button?.window, w.frame.height > 0 else { return nil }
+        return w.frame.minX - (w.screen?.frame.minX ?? 0)
+    }
+
+    /// True when `a` is left of `b`, or when we can't tell (no layout yet).
+    private func isLeft(_ a: NSStatusItem, of b: NSStatusItem) -> Bool {
+        guard let ax = frameX(a), let bx = frameX(b) else { return true }
+        return ax < bx
+    }
+
+    private func warnWrongOrder() {
+        NSSound.beep()
+        guard !warnedAboutOrder else { return }
+        warnedAboutOrder = true
+        NSApp.activate(ignoringOtherApps: true)
+        let alert = NSAlert()
+        alert.messageText = "The separator is on the wrong side"
+        alert.informativeText = "BarTidy hides the icons to the left of the | separator. Hold ⌘ and drag the separator so it sits to the left of the BarTidy arrow, then try again."
+        alert.runModal()
+    }
+
+    // MARK: Debug
+
+    func dumpFrames(_ tag: String) {
+        guard Pref.debugLogging else { return }
+        func d(_ n: String, _ i: NSStatusItem) -> String {
+            let w = i.button?.window
+            return "\(n) len=\(i.length) vis=\(i.isVisible) frame=\(w.map { NSStringFromRect($0.frame) } ?? "nil") onscreen=\(w.map { $0.occlusionState.contains(.visible) } ?? false)"
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [self] in
+            debugLog("[\(tag)+0.5s] \(d("toggle", toggle)) | \(d("sep", separator)) | \(d("ahSep", alwaysHiddenSeparator))")
+        }
+    }
+}
+
+// MARK: - Global hotkey (Carbon; needs no Accessibility permission)
+
+final class HotKey {
+    private var hotKeyRef: EventHotKeyRef?
+    private var handlerRef: EventHandlerRef?
+    private let action: () -> Void
+
+    init?(keyCode: Int, modifiers: Int, action: @escaping () -> Void) {
+        self.action = action
+        var spec = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
+        let me = Unmanaged.passUnretained(self).toOpaque()
+        let installed = InstallEventHandler(GetApplicationEventTarget(), { _, _, userData in
+            guard let userData else { return OSStatus(eventNotHandledErr) }
+            let hotKey = Unmanaged<HotKey>.fromOpaque(userData).takeUnretainedValue()
+            DispatchQueue.main.async { hotKey.action() }
+            return noErr
+        }, 1, &spec, me, &handlerRef)
+        guard installed == noErr else { return nil }
+
+        let id = EventHotKeyID(signature: OSType(0x4254_4459) /* 'BTDY' */, id: 1)
+        let registered = RegisterEventHotKey(UInt32(keyCode), UInt32(modifiers), id, GetApplicationEventTarget(), 0, &hotKeyRef)
+        guard registered == noErr else {
+            debugLog("RegisterEventHotKey failed: \(registered)")
+            if let handlerRef { RemoveEventHandler(handlerRef) }
+            return nil
         }
     }
 
-    private func separatorIsLeftOfToggle() -> Bool {
-        guard let sepX = separatorItem.button?.window?.frame.origin.x,
-              let togX = toggleItem.button?.window?.frame.origin.x else { return true }
-        return sepX < togX
+    deinit {
+        if let hotKeyRef { UnregisterEventHotKey(hotKeyRef) }
+        if let handlerRef { RemoveEventHandler(handlerRef) }
+    }
+}
+
+// MARK: - Launch at login
+
+enum LoginItem {
+    static var isEnabled: Bool {
+        let s = SMAppService.mainApp.status
+        return s == .enabled || s == .requiresApproval
+    }
+    static var needsApproval: Bool { SMAppService.mainApp.status == .requiresApproval }
+
+    static func set(_ on: Bool) throws {
+        if on { try SMAppService.mainApp.register() } else { try SMAppService.mainApp.unregister() }
+    }
+}
+
+// MARK: - Preferences window
+
+final class PreferencesWindowController: NSWindowController, NSWindowDelegate {
+    private let bar: MenuBarController
+    private let loginBox = NSButton(checkboxWithTitle: "Launch BarTidy at login", target: nil, action: nil)
+    private let loginNote = NSTextField(labelWithString: "")
+    private let alwaysHiddenBox = NSButton(checkboxWithTitle: "Enable always-hidden section", target: nil, action: nil)
+    private let separatorBox = NSButton(checkboxWithTitle: "Show separator icons", target: nil, action: nil)
+    private let delayPopup = NSPopUpButton()
+    private static let delays: [(String, Double)] = [
+        ("Never", 0), ("5 seconds", 5), ("10 seconds", 10), ("15 seconds", 15),
+        ("30 seconds", 30), ("1 minute", 60), ("5 minutes", 300),
+    ]
+
+    init(bar: MenuBarController) {
+        self.bar = bar
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 420, height: 10),
+                              styleMask: [.titled, .closable], backing: .buffered, defer: false)
+        window.title = "BarTidy Preferences"
+        window.isReleasedWhenClosed = false
+        super.init(window: window)
+        window.delegate = self
+        buildUI()
     }
 
-    private func symbol(_ name: String) -> NSImage? {
-        let img = NSImage(systemSymbolName: name, accessibilityDescription: nil)
-        img?.isTemplate = true
-        return img
+    required init?(coder: NSCoder) { fatalError("not used") }
+
+    private func buildUI() {
+        for b in [loginBox, alwaysHiddenBox, separatorBox] { b.target = self; b.action = #selector(changed(_:)) }
+        loginNote.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+        loginNote.textColor = .secondaryLabelColor
+
+        for (title, _) in Self.delays { delayPopup.addItem(withTitle: title) }
+        delayPopup.target = self
+        delayPopup.action = #selector(changed(_:))
+        let delayLabel = NSTextField(labelWithString: "Auto-collapse after:")
+        let delayRow = NSStackView(views: [delayLabel, delayPopup])
+        delayRow.spacing = 8
+
+        let help = NSTextField(wrappingLabelWithString:
+            "Click the arrow to show or hide icons, or press ⌃⌥B anywhere.\n" +
+            "⌥-click the arrow to also show the always-hidden section.\n" +
+            "Hold ⌘ and drag menu bar icons to move them between sections: " +
+            "icons left of | are hidden, icons left of ┊ are always hidden.")
+        help.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+        help.textColor = .secondaryLabelColor
+        help.preferredMaxLayoutWidth = 372
+
+        let stack = NSStackView(views: [loginBox, loginNote, alwaysHiddenBox, separatorBox, delayRow, help])
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 10
+        stack.setCustomSpacing(2, after: loginBox)
+        stack.setCustomSpacing(18, after: delayRow)
+        stack.edgeInsets = NSEdgeInsets(top: 20, left: 24, bottom: 20, right: 24)
+        stack.translatesAutoresizingMaskIntoConstraints = false
+
+        let content = NSView()
+        content.addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.leadingAnchor.constraint(equalTo: content.leadingAnchor),
+            stack.trailingAnchor.constraint(equalTo: content.trailingAnchor),
+            stack.topAnchor.constraint(equalTo: content.topAnchor),
+            stack.bottomAnchor.constraint(equalTo: content.bottomAnchor),
+            content.widthAnchor.constraint(equalToConstant: 420),
+        ])
+        window?.contentView = content
+    }
+
+    func refresh() {
+        loginBox.state = LoginItem.isEnabled ? .on : .off
+        loginNote.stringValue = LoginItem.needsApproval
+            ? "Waiting for approval in System Settings › General › Login Items."
+            : ""
+        loginNote.isHidden = loginNote.stringValue.isEmpty
+        alwaysHiddenBox.state = Pref.alwaysHiddenEnabled ? .on : .off
+        separatorBox.state = Pref.showSeparator ? .on : .off
+        let delay = Pref.autoCollapseDelay
+        let index = Self.delays.firstIndex(where: { $0.1 == delay }) ?? 2
+        delayPopup.selectItem(at: index)
+    }
+
+    @objc private func changed(_ sender: Any) {
+        switch sender as AnyObject {
+        case let b as NSButton where b === loginBox:
+            do {
+                try LoginItem.set(b.state == .on)
+                if LoginItem.needsApproval { SMAppService.openSystemSettingsLoginItems() }
+            } catch {
+                let alert = NSAlert(error: error)
+                alert.messageText = "Couldn't change the login item"
+                alert.runModal()
+            }
+        case let b as NSButton where b === alwaysHiddenBox:
+            Pref.alwaysHiddenEnabled = b.state == .on
+            bar.preferencesChanged()
+        case let b as NSButton where b === separatorBox:
+            Pref.showSeparator = b.state == .on
+            bar.preferencesChanged()
+        case let p as NSPopUpButton where p === delayPopup:
+            Pref.autoCollapseDelay = Self.delays[max(0, p.indexOfSelectedItem)].1
+            bar.preferencesChanged()
+        default: break
+        }
+        refresh()
+    }
+
+    func show() {
+        refresh()
+        if window?.isVisible != true { window?.center() }
+        NSApp.activate(ignoringOtherApps: true)
+        window?.makeKeyAndOrderFront(nil)
+    }
+
+    func windowDidBecomeKey(_ notification: Notification) { refresh() }
+}
+
+// MARK: - App
+
+final class AppDelegate: NSObject, NSApplicationDelegate {
+    private var bar: MenuBarController!
+    private var prefs: PreferencesWindowController?
+    private var hotKey: HotKey?
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        Pref.registerDefaults()
+        bar = MenuBarController()
+        bar.onShowPreferences = { [weak self] in self?.showPreferences() }
+
+        // ⌃⌥B toggles from anywhere.
+        hotKey = HotKey(keyCode: kVK_ANSI_B, modifiers: controlKey | optionKey) { [weak self] in
+            self?.bar.toggleHidden()
+        }
+        if hotKey == nil { NSLog("BarTidy: could not register ⌃⌥B (already taken by another app?)") }
+
+        if Pref.debugLogging {
+            // Lets scripts drive the app while debugging.
+            DistributedNotificationCenter.default().addObserver(
+                forName: .init("com.krishna.bartidy.toggle"), object: nil, queue: .main
+            ) { [weak self] _ in self?.bar.toggleHidden() }
+        }
+
+        bar.collapseWhenReady()
+    }
+
+    /// Opening the app again from Finder/Spotlight shows Preferences, as there is no Dock icon.
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        showPreferences()
+        return false
+    }
+
+    private func showPreferences() {
+        if prefs == nil { prefs = PreferencesWindowController(bar: bar) }
+        prefs?.show()
     }
 }
 
