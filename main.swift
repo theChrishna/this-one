@@ -496,6 +496,8 @@ final class PreferencesWindowController: NSWindowController, NSWindowDelegate {
             content.widthAnchor.constraint(equalToConstant: 420),
         ])
         window?.contentView = content
+        content.layoutSubtreeIfNeeded()
+        window?.setContentSize(content.fittingSize)
     }
 
     func refresh() {
@@ -577,6 +579,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self.bar.separator.length = l
                 self.bar.dumpFrames("debugLength \(l)")
             }
+            DistributedNotificationCenter.default().addObserver(
+                forName: .init("com.krishna.bartidy.debugLoginItem"), object: nil, queue: .main
+            ) { n in
+                let on = (n.object as? String) == "on"
+                do { try LoginItem.set(on) } catch { debugLog("login item error: \(error)") }
+                debugLog("login item set \(on) -> status \(SMAppService.mainApp.status.rawValue) enabled=\(LoginItem.isEnabled) needsApproval=\(LoginItem.needsApproval)")
+            }
+            DistributedNotificationCenter.default().addObserver(
+                forName: .init("com.krishna.bartidy.debugSnapshot"), object: nil, queue: .main
+            ) { [weak self] n in
+                if let path = n.object as? String { self?.snapshotPreferences(to: path) }
+            }
         }
 
         bar.collapseWhenReady()
@@ -586,6 +600,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         showPreferences()
         return false
+    }
+
+    /// Debug: render the Preferences window to a PNG (works while the screen is locked).
+    func snapshotPreferences(to path: String) {
+        showPreferences()
+        guard let view = prefs?.window?.contentView else { return }
+        view.layoutSubtreeIfNeeded()
+        try? view.dataWithPDF(inside: view.bounds).write(to: URL(fileURLWithPath: path))
+        debugLog("snapshot \(NSStringFromRect(view.bounds)) -> \(path)")
     }
 
     private func showPreferences() {
