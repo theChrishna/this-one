@@ -123,6 +123,10 @@ final class MenuBarController: NSObject {
     private(set) var state: State = .expanded
     private var collapseTimer: Timer?
     private var warnedAboutOrder = false
+    private var warnedAboutRescue = false
+    /// Set when hiding made the arrow itself unreachable; blocks automatic re-collapse.
+    private var hidingBlocked = false
+    private var watchdogWork: DispatchWorkItem?
     private var verifyWork: DispatchWorkItem?
     var onShowPreferences: (() -> Void)?
 
@@ -255,6 +259,11 @@ final class MenuBarController: NSObject {
         debugLog("apply \(requested.rawValue) user=\(userInitiated) from=\(state.rawValue)")
         var target = requested
         if target == .expandedAll && !Pref.alwaysHiddenEnabled { target = .expanded }
+        if userInitiated { hidingBlocked = false }
+        if target == .collapsed && hidingBlocked {
+            debugLog("collapse skipped: hiding blocked after rescue")
+            return
+        }
 
         // Collapsing with the separator on the wrong side of the toggle would hide
         // the toggle itself (and the user would lose the app). Refuse instead.
@@ -276,13 +285,18 @@ final class MenuBarController: NSObject {
     func preferencesChanged() {
         alwaysHiddenSeparator.isVisible = Pref.alwaysHiddenEnabled
         if state == .expandedAll && !Pref.alwaysHiddenEnabled { state = .expanded }
+        hidingBlocked = false
         render()
         scheduleAutoCollapse()
     }
 
     private func render() {
-        let hideAlwaysHiddenZone = Pref.alwaysHiddenEnabled && state != .expandedAll
+        // The always-hidden zone is only hidden when its separator is left of BOTH the
+        // main separator and the arrow. Otherwise a 900pt-wide separator would push the
+        // arrow itself out of the menu bar.
+        let hideAlwaysHiddenZone = Pref.alwaysHiddenEnabled && state == .expanded && !hidingBlocked
             && isLeft(alwaysHiddenSeparator, of: separator)
+            && isLeft(alwaysHiddenSeparator, of: toggle)
 
         switch state {
         case .collapsed:
@@ -301,7 +315,10 @@ final class MenuBarController: NSObject {
         }
 
         if Pref.alwaysHiddenEnabled {
-            if state == .collapsed || hideAlwaysHiddenZone {
+            // When collapsed, the main separator already hides everything to its left
+            // (including the always-hidden zone), so this one stays small. Two huge
+            // separators at once is what overflowed the arrow.
+            if hideAlwaysHiddenZone {
                 alwaysHiddenSeparator.button?.image = nil
                 alwaysHiddenSeparator.length = hidingLength
             } else {
@@ -311,6 +328,45 @@ final class MenuBarController: NSObject {
         }
         debugLog("render state=\(state.rawValue)")
         dumpFrames("render")
+        if state == .collapsed || hideAlwaysHiddenZone { scheduleWatchdog() }
+    }
+
+    // MARK: Self-rescue
+
+    /// True when the arrow is somewhere the user can actually click it.
+    private func toggleIsReachable() -> Bool {
+        if Pref.debugLogging && UserDefaults.standard.bool(forKey: "debugFakeToggleHidden") { return false }
+        guard let w = toggle.button?.window, w.frame.height > 0 else { return true }  // not laid out yet
+        guard let screen = w.screen ?? NSScreen.main else { return false }
+        return screen.frame.insetBy(dx: -1, dy: -1).contains(w.frame)
+    }
+
+    /// If hiding ever takes the arrow itself off the menu bar (wrong order, a crowded
+    /// bar, a display change…), put everything back so the user is never locked out.
+    private func scheduleWatchdog() {
+        watchdogWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            guard !self.toggleIsReachable() else { return }
+            debugLog("RESCUE: arrow is not reachable, expanding")
+            self.hidingBlocked = true
+            self.state = .expanded
+            self.render()
+            self.scheduleAutoCollapse()
+            self.explainRescue()
+        }
+        watchdogWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.9, execute: work)
+    }
+
+    private func explainRescue() {
+        guard !warnedAboutRescue else { return }
+        warnedAboutRescue = true
+        NSApp.activate(ignoringOtherApps: true)
+        let alert = NSAlert()
+        alert.messageText = "BarTidy showed your menu bar icons again"
+        alert.informativeText = "Hiding was pushing BarTidy's own arrow off the menu bar. Hold ⌘ and drag the | separators so they sit to the left of the arrow (the arrow must be the right-most BarTidy item), then click the arrow to hide again. Automatic hiding stays off until you click the arrow."
+        alert.runModal()
     }
 
     private func scheduleAutoCollapse() {
