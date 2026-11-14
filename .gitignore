@@ -1,5 +1,8 @@
-BarTidy.app/
 *.dSYM/
-.DS_Store
-build/
+*.xcuserstate
 *.zip
+.DS_Store
+.build/
+.swiftpm/
+BarTidy.app/
+build/

@@ -66,14 +66,14 @@ final class OverlayManager {
     /// so they never appear against a normal menu bar.
     func reconcile(barDisplays: Set<CGDirectDisplayID> = [], blackDisplays: Set<CGDirectDisplayID>) {
         reconcileBars(barDisplays)
-        let wanted: [ScreenGeometry] = Prefs.enabled && Prefs.cornersEnabled
-            ? ScreenGeometry.all().filter { (Prefs.allScreens || $0.hasNotch) && blackDisplays.contains($0.displayID) } : []
+        let wanted: [ScreenGeometry] = NotchPrefs.enabled && NotchPrefs.cornersEnabled
+            ? ScreenGeometry.all().filter { (NotchPrefs.allScreens || $0.hasNotch) && blackDisplays.contains($0.displayID) } : []
         let ids = Set(wanted.map(\.displayID))
         for id in windows.keys where !ids.contains(id) { removeWindows(for: id) }
 
-        let radius = CGFloat(Prefs.cornerRadius)
+        let radius = CGFloat(NotchPrefs.cornerRadius)
         for geo in wanted {
-            let corners = ScreenCorner.allCases.filter { $0.isTop || Prefs.bottomCorners }
+            let corners = ScreenCorner.allCases.filter { $0.isTop || NotchPrefs.bottomCorners }
             var set = windows[geo.displayID] ?? [:]
             for stale in set.keys where !corners.contains(stale) { set[stale]?.orderOut(nil); set[stale] = nil }
             for corner in corners {
@@ -94,7 +94,7 @@ final class OverlayManager {
 
     /// .transient is hidden by Mission Control / Exposé; .stationary stays visible there. User-selectable.
     private static func behavior(extra: NSWindow.CollectionBehavior = []) -> NSWindow.CollectionBehavior {
-        [.canJoinAllSpaces, .ignoresCycle, Prefs.showInMissionControl ? .stationary : .transient].reduce(extra) { $0.union($1) }
+        [.canJoinAllSpaces, .ignoresCycle, NotchPrefs.showInMissionControl ? .stationary : .transient].reduce(extra) { $0.union($1) }
     }
 
     func removeAll() {
@@ -104,17 +104,17 @@ final class OverlayManager {
 
     private func reconcileBars(_ ids: Set<CGDirectDisplayID>) {
         let geos = Dictionary(uniqueKeysWithValues: ScreenGeometry.all().map { ($0.displayID, $0) })
-        for id in Array(bars.keys) where !ids.contains(id) || geos[id] == nil || !Prefs.enabled {
+        for id in Array(bars.keys) where !ids.contains(id) || geos[id] == nil || !NotchPrefs.enabled {
             bars[id]?.orderOut(nil); bars[id]?.close(); bars[id] = nil
         }
-        guard Prefs.enabled else { return }
+        guard NotchPrefs.enabled else { return }
         for id in ids {
             guard let geo = geos[id] else { continue }
             let h = geo.menuBarHeight > 0 ? geo.menuBarHeight : geo.safeAreaTop
             guard h > 0 else { bars[id]?.orderOut(nil); continue }
             let win = bars[id] ?? makeBar()
             bars[id] = win
-            win.level = NSWindow.Level(rawValue: Prefs.barLevel)
+            win.level = NSWindow.Level(rawValue: NotchPrefs.barLevel)
             win.collectionBehavior = Self.behavior()
             win.setFrame(NSRect(x: geo.frame.minX, y: geo.frame.maxY - h, width: geo.frame.width, height: h), display: true)
             win.orderFrontRegardless()

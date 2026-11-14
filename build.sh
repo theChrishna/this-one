@@ -9,7 +9,7 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 APP="BarTidy.app"
-VERSION="1.0"
+VERSION="2.0"
 BUILD="$(git rev-list --count HEAD 2>/dev/null || echo 1)"
 MIN_MACOS="13.0"
 TMP="$(mktemp -d)"
@@ -18,8 +18,10 @@ trap 'rm -rf "$TMP"' EXIT
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 
+SOURCES=()
+while IFS= read -r f; do SOURCES+=("$f"); done < <(find Sources/BarTidy -name '*.swift' | sort)
 for arch in arm64 x86_64; do
-  swiftc -O -target "$arch-apple-macos$MIN_MACOS" -o "$TMP/BarTidy-$arch" main.swift
+  swiftc -O -target "$arch-apple-macos$MIN_MACOS" -module-name BarTidy -o "$TMP/BarTidy-$arch" "${SOURCES[@]}"
 done
 lipo -create "$TMP/BarTidy-arm64" "$TMP/BarTidy-x86_64" -output "$APP/Contents/MacOS/BarTidy"
 

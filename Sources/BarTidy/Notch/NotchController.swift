@@ -1,55 +1,44 @@
 import AppKit
-import SwiftUI
 
-final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
+/// Owns the notch feature: black menu bar (wallpaper edit or overlay bar) and the concave corners.
+/// Event-driven only: screen, Space, wake and wallpaper-change notifications plus settings changes.
+final class NotchController: NSObject {
     private let overlays = OverlayManager()
     private let wallpaper = WallpaperManager()
-    private var lastSignature = Prefs.signature
+    private var lastSignature = NotchPrefs.signature
     private var refreshWork: DispatchWorkItem?
-    private var statusItem: NSStatusItem?
+    private var legacyApp: NSRunningApplication?   // KVO doesn't retain the observed object
+    private var legacyQuitObservation: NSKeyValueObservation?
+    private var started = false
     private var lastLog = ""
 
-    func applicationDidFinishLaunching(_ notification: Notification) {
-        NSApp.setActivationPolicy(.accessory)
-
-        let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        item.button?.image = NSImage(systemSymbolName: "rectangle.topthird.inset.filled",
-                                     accessibilityDescription: "NotchHider")
-        let menu = NSMenu()
-        menu.delegate = self
-        add(menu, "Enable", #selector(toggleEnabled))
-        add(menu, "Rounded corners", #selector(toggleCorners))
-        add(menu, "Bottom corners too", #selector(toggleBottom))
-        add(menu, "Apply to all screens", #selector(toggleAll))
-        add(menu, "Keep overlays in Mission Control", #selector(toggleMissionControl))
-        let modeItem = NSMenuItem(title: "Mode", action: nil, keyEquivalent: "")
-        let modeMenu = NSMenu()
-        for (title, tag) in [("Wallpaper", 0), ("Overlay", 1)] {
-            let i = NSMenuItem(title: title, action: #selector(setMode(_:)), keyEquivalent: "")
-            i.tag = tag; i.target = self; modeMenu.addItem(i)
+    /// Asks a still-running standalone NotchHider to quit first (it would draw a second set of overlays,
+    /// and it restores its own wallpaper on quit), then starts.
+    func start() {
+        guard let old = NSRunningApplication.runningApplications(withBundleIdentifier: NotchPrefs.legacyBundleID).first else {
+            finishStart(); return
         }
-        modeItem.submenu = modeMenu
-        menu.addItem(modeItem)
-        let radiusItem = NSMenuItem(title: "Corner radius", action: nil, keyEquivalent: "")
-        let sub = NSMenu()
-        for r in [8, 10, 12, 16, 20, 24, 28] {
-            let i = NSMenuItem(title: "\(r) pt", action: #selector(setRadius(_:)), keyEquivalent: "")
-            i.tag = r; i.target = self; sub.addItem(i)
+        // NSWorkspace doesn't post didTerminateApplication for LSUIElement apps, so observe the app itself.
+        legacyApp = old
+        legacyQuitObservation = old.observe(\.isTerminated, options: [.initial, .new]) { [weak self] app, _ in
+            guard app.isTerminated else { return }
+            DispatchQueue.main.async { self?.finishStart() }
         }
-        radiusItem.submenu = sub
-        menu.addItem(radiusItem)
-        menu.addItem(.separator())
-        add(menu, "Restore original wallpaper", #selector(restoreWallpaper))
-        add(menu, "Settings…", #selector(openSettings))
-        menu.addItem(.separator())
-        menu.addItem(withTitle: "Log screen geometry", action: #selector(logNow), keyEquivalent: "l").target = self
-        menu.addItem(withTitle: "Copy last log", action: #selector(copyLog), keyEquivalent: "c").target = self
-        menu.addItem(.separator())
-        menu.addItem(withTitle: "Quit NotchHider", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
-        item.menu = menu
-        statusItem = item
+        debugLog("notch: asking standalone NotchHider to quit")
+        old.terminate()
+        // If it doesn't quit (hung, or showing an alert), start anyway rather than never.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self] in self?.finishStart() }
+    }
 
-        // Event-driven only: no timers. Settings window writes UserDefaults; re-apply when they change.
+    private func finishStart() {
+        guard !started else { return }
+        started = true
+        legacyQuitObservation = nil
+        legacyApp = nil
+        NotchPrefs.migrateFromLegacyAppIfNeeded()
+        lastSignature = NotchPrefs.signature
+
+        // Preferences write UserDefaults; re-apply when a notch setting changes.
         NotificationCenter.default.addObserver(self, selector: #selector(prefsChanged),
             name: UserDefaults.didChangeNotification, object: nil)
         NotificationCenter.default.addObserver(self, selector: #selector(changed(_:)),
@@ -58,64 +47,58 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             name: NSWorkspace.activeSpaceDidChangeNotification, object: nil)
         NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(changed(_:)),
             name: NSWorkspace.didWakeNotification, object: nil)
-
-        wallpaper.onChange = { [weak self] in
-            guard let self else { return }
-            self.reconcileOverlays()
-        }
-        // The system posts this when the desktop picture changes (undocumented; we only log and re-check).
+        // The system posts this when the desktop picture changes (undocumented; we only re-check).
         DistributedNotificationCenter.default().addObserver(self, selector: #selector(changed(_:)),
             name: NSNotification.Name("com.apple.desktop"), object: nil)
 
-        let crashed = Prefs.cleanExit == false
-        Prefs.cleanExit = false
+        wallpaper.onChange = { [weak self] in self?.reconcileOverlays() }
+
+        let crashed = NotchPrefs.cleanExit == false
+        NotchPrefs.cleanExit = false
         log("launch (previous run crashed: \(crashed))")
         if crashed && wallpaper.hasGeneratedWallpaperSet { offerRecovery() }
         refresh()
     }
 
-    func applicationWillTerminate(_ notification: Notification) {
+    /// Call from applicationWillTerminate: original wallpapers back, all overlay windows gone.
+    func stop() {
+        guard started else { return }
         wallpaper.restoreAll()
         overlays.removeAll()
-        Prefs.cleanExit = true
-    }
-
-    /// Launching the app again (Finder, Spotlight) while it runs has no Dock icon to click, so show the settings.
-    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
-        openSettings()
-        return false
+        NotchPrefs.cleanExit = true
     }
 
     private func offerRecovery() {
         NSApp.activate(ignoringOtherApps: true)
         let alert = NSAlert()
-        alert.messageText = "NotchHider didn't quit cleanly"
-        alert.informativeText = "A generated wallpaper is still set. Restore your original wallpaper now?"
+        alert.messageText = "BarTidy didn't quit cleanly"
+        alert.informativeText = "A wallpaper with a black menu bar band is still set. Restore your original wallpaper now?"
         alert.addButton(withTitle: "Restore original")
         alert.addButton(withTitle: "Keep and continue")
         if alert.runModal() == .alertFirstButtonReturn {
             wallpaper.restoreAll()
-            Prefs.enabled = false
+            NotchPrefs.enabled = false
         }
     }
 
     // MARK: Coordination
 
     private func targets() -> [ScreenGeometry] {
-        ScreenGeometry.all().filter { Prefs.allScreens || $0.hasNotch }
+        ScreenGeometry.all().filter { NotchPrefs.allScreens || $0.hasNotch }
     }
 
     private func barDisplays() -> Set<CGDirectDisplayID> {
-        guard Prefs.enabled else { return [] }
+        guard NotchPrefs.enabled else { return [] }
         // Overlay mode, or wallpaper mode where the wallpaper can't be edited. When overlays should survive Mission Control
         // the bar must be a window too: the wallpaper itself is blurred away there.
-        if Prefs.mode == "overlay" || Prefs.showInMissionControl { return Set(targets().map(\.displayID)) }
+        if NotchPrefs.mode == "overlay" || NotchPrefs.showInMissionControl { return Set(targets().map(\.displayID)) }
         return wallpaper.needsOverlay
     }
 
     /// Single entry point after any event: restores, regenerates or removes things as settings dictate.
     private func refresh() {
-        if !Prefs.enabled || Prefs.mode == "overlay" {
+        guard started else { return }
+        if !NotchPrefs.enabled || NotchPrefs.mode == "overlay" {
             wallpaper.restoreAll()
         } else {
             wallpaper.apply(targets: targets())
@@ -125,71 +108,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private func reconcileOverlays() {
         let bars = barDisplays()
-        overlays.reconcile(barDisplays: bars, blackDisplays: bars.union(Prefs.enabled ? wallpaper.editedDisplays : []))
-    }
-
-    private func add(_ menu: NSMenu, _ title: String, _ sel: Selector) {
-        menu.addItem(withTitle: title, action: sel, keyEquivalent: "").target = self
-    }
-
-    func menuWillOpen(_ menu: NSMenu) {
-        menu.items.filter { $0.tag == -7 }.forEach(menu.removeItem)
-        for (id, text) in wallpaper.status.sorted(by: { $0.key < $1.key }) {
-            let name = ScreenGeometry.all().first { $0.displayID == id }?.name ?? "Display \(id)"
-            let item = NSMenuItem(title: "\(name): \(text)", action: nil, keyEquivalent: "")
-            item.tag = -7; item.isEnabled = false
-            menu.insertItem(item, at: 0)
-        }
-        for item in menu.items {
-            switch item.action {
-            case #selector(toggleEnabled): item.state = Prefs.enabled ? .on : .off
-            case #selector(toggleCorners): item.state = Prefs.cornersEnabled ? .on : .off
-            case #selector(toggleBottom): item.state = Prefs.bottomCorners ? .on : .off
-            case #selector(toggleAll): item.state = Prefs.allScreens ? .on : .off
-            case #selector(toggleMissionControl): item.state = Prefs.showInMissionControl ? .on : .off
-            default:
-                if item.title == "Mode" {
-                    item.submenu?.items.forEach { $0.state = ($0.tag == 1) == (Prefs.mode == "overlay") ? .on : .off }
-                } else {
-                    item.submenu?.items.forEach { $0.state = Double($0.tag) == Prefs.cornerRadius ? .on : .off }
-                }
-            }
-        }
+        overlays.reconcile(barDisplays: bars, blackDisplays: bars.union(NotchPrefs.enabled ? wallpaper.editedDisplays : []))
     }
 
     @objc private func prefsChanged() {
-        guard Prefs.signature != lastSignature else { return }
-        lastSignature = Prefs.signature
+        guard NotchPrefs.signature != lastSignature else { return }
+        lastSignature = NotchPrefs.signature
         refresh()
     }
 
-    /// The SwiftUI Settings scene can't be opened from an accessory app's menu, so host the view in our own window.
-    private lazy var settingsWindow: NSWindow = {
-        let w = NSWindow(contentViewController: NSHostingController(rootView: SettingsView()))
-        w.title = "NotchHider Settings"
-        w.styleMask = [.titled, .closable]
-        w.isReleasedWhenClosed = false
-        w.center()
-        return w
-    }()
-
-    @objc private func openSettings() {
-        NSApp.activate(ignoringOtherApps: true)
-        settingsWindow.makeKeyAndOrderFront(nil)
-    }
-
-    @objc private func setMode(_ item: NSMenuItem) { Prefs.mode = item.tag == 1 ? "overlay" : "wallpaper"; prefsChanged() }
-    @objc private func restoreWallpaper() { wallpaper.restoreAll(); Prefs.enabled = false; prefsChanged() }
-
-    @objc private func toggleEnabled() { Prefs.enabled.toggle(); refresh() }
-    @objc private func toggleCorners() { Prefs.cornersEnabled.toggle(); refresh() }
-    @objc private func toggleBottom() { Prefs.bottomCorners.toggle(); refresh() }
-    @objc private func toggleMissionControl() { Prefs.showInMissionControl.toggle(); prefsChanged() }
-    @objc private func toggleAll() { Prefs.allScreens.toggle(); refresh() }
-    @objc private func setRadius(_ item: NSMenuItem) { Prefs.cornerRadius = Double(item.tag); refresh() }
-
     @objc private func changed(_ note: Notification) {
-        // visibleFrame can lag the Space-change notification slightly; log once now and once shortly after.
         log(note.name.rawValue)
         refresh()
         // Coalesced follow-up: visibleFrame and the wallpaper URL can lag the notification slightly.
@@ -202,18 +130,88 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5, execute: work)
     }
 
-    @objc private func logNow() { log("manual") }
+    // MARK: Menu
+
+    /// "Notch" submenu for the arrow's right-click menu. Built fresh each time, so check marks are current.
+    func makeMenuItem() -> NSMenuItem {
+        let menu = NSMenu()
+        for (id, text) in wallpaper.status.sorted(by: { $0.key < $1.key }) where NotchPrefs.enabled {
+            let name = ScreenGeometry.all().first { $0.displayID == id }?.name ?? "Display \(id)"
+            let item = NSMenuItem(title: "\(name): \(text)", action: nil, keyEquivalent: "")
+            item.isEnabled = false
+            menu.addItem(item)
+        }
+        if !menu.items.isEmpty { menu.addItem(.separator()) }
+
+        add(menu, "Hide the notch", #selector(toggleEnabled), on: NotchPrefs.enabled)
+        add(menu, "Rounded corners", #selector(toggleCorners), on: NotchPrefs.cornersEnabled)
+        add(menu, "Bottom corners too", #selector(toggleBottom), on: NotchPrefs.bottomCorners)
+        add(menu, "Apply to all screens", #selector(toggleAll), on: NotchPrefs.allScreens)
+        add(menu, "Keep overlays in Mission Control", #selector(toggleMissionControl), on: NotchPrefs.showInMissionControl)
+
+        let modeMenu = NSMenu()
+        for (title, value) in [("Edit wallpaper", "wallpaper"), ("Overlay window", "overlay")] {
+            let i = NSMenuItem(title: title, action: #selector(setMode(_:)), keyEquivalent: "")
+            i.representedObject = value; i.target = self
+            i.state = NotchPrefs.mode == value ? .on : .off
+            modeMenu.addItem(i)
+        }
+        let modeItem = NSMenuItem(title: "Black bar method", action: nil, keyEquivalent: "")
+        modeItem.submenu = modeMenu
+        menu.addItem(modeItem)
+
+        let radiusMenu = NSMenu()
+        for r in [8, 10, 12, 16, 20, 24, 28] {
+            let i = NSMenuItem(title: "\(r) pt", action: #selector(setRadius(_:)), keyEquivalent: "")
+            i.tag = r; i.target = self
+            i.state = Double(r) == NotchPrefs.cornerRadius ? .on : .off
+            radiusMenu.addItem(i)
+        }
+        let radiusItem = NSMenuItem(title: "Corner radius", action: nil, keyEquivalent: "")
+        radiusItem.submenu = radiusMenu
+        menu.addItem(radiusItem)
+
+        menu.addItem(.separator())
+        add(menu, "Restore original wallpaper", #selector(restoreWallpaper))
+        add(menu, "Log screen geometry", #selector(logNow))
+        add(menu, "Copy last geometry log", #selector(copyLog))
+
+        let root = NSMenuItem(title: "Notch", action: nil, keyEquivalent: "")
+        root.submenu = menu
+        return root
+    }
+
+    private func add(_ menu: NSMenu, _ title: String, _ sel: Selector, on: Bool? = nil) {
+        let item = NSMenuItem(title: title, action: sel, keyEquivalent: "")
+        item.target = self
+        if let on { item.state = on ? .on : .off }
+        menu.addItem(item)
+    }
+
+    @objc private func setMode(_ item: NSMenuItem) { NotchPrefs.mode = item.representedObject as? String ?? "wallpaper"; prefsChanged() }
+    @objc private func restoreWallpaper() { wallpaper.restoreAll(); NotchPrefs.enabled = false; prefsChanged() }
+    @objc private func toggleEnabled() { NotchPrefs.enabled.toggle(); prefsChanged() }
+    @objc private func toggleCorners() { NotchPrefs.cornersEnabled.toggle(); prefsChanged() }
+    @objc private func toggleBottom() { NotchPrefs.bottomCorners.toggle(); prefsChanged() }
+    @objc private func toggleMissionControl() { NotchPrefs.showInMissionControl.toggle(); prefsChanged() }
+    @objc private func toggleAll() { NotchPrefs.allScreens.toggle(); prefsChanged() }
+    @objc private func setRadius(_ item: NSMenuItem) { NotchPrefs.cornerRadius = Double(item.tag); prefsChanged() }
+
+    // MARK: Geometry log
+
+    @objc private func logNow() { log("manual", force: true) }
 
     @objc private func copyLog() {
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(lastLog, forType: .string)
     }
 
-    private func log(_ reason: String) {
+    /// Keeps the latest geometry snapshot for "Copy"; prints it only with debug logging on (or when asked).
+    private func log(_ reason: String, force: Bool = false) {
         let screens = ScreenGeometry.all()
-        var out = "=== NotchHider geometry [\(reason)] \(Date()) — \(screens.count) screen(s) ===\n"
+        var out = "=== notch geometry [\(reason)] \(Date()) — \(screens.count) screen(s) ===\n"
         out += screens.map(\.debugDescription).joined(separator: "\n")
         lastLog = out
-        FileHandle.standardError.write(Data((out + "\n").utf8))
+        if force { FileHandle.standardError.write(Data((out + "\n").utf8)) } else { debugLog(out) }
     }
 }

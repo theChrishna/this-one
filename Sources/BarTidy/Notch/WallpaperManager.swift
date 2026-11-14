@@ -42,13 +42,15 @@ struct WallpaperRecord: Codable {
 final class WallpaperManager {
     static let directory: URL = {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        // Same folder as the standalone NotchHider, so files it left behind are still recognised as ours
+        // (never treated as a new original and banded twice).
         let dir = base.appendingPathComponent("NotchHider", isDirectory: true)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         return dir
     }()
 
     private let ws = NSWorkspace.shared
-    private let recordsKey = "wallpaperRecords"
+    private let recordsKey = NotchPrefs.Key.wallpaperRecords
     private var records: [String: WallpaperRecord]
     private let renderQueue = DispatchQueue(label: "NotchHider.render", qos: .userInitiated)
     private var busy = false, pendingTargets: [ScreenGeometry]?
@@ -140,7 +142,7 @@ final class WallpaperManager {
             records[uuid] = record
             persist()
         }
-        guard var rec = record else { return nil }
+        guard let rec = record else { return nil }
         let original = URL(fileURLWithPath: rec.originalPath)
         if let reason = Self.uneditableReason(original) {
             // Original became uneditable (e.g. a record from an older build). If our edited copy is showing, put the
@@ -166,7 +168,7 @@ final class WallpaperManager {
 
     private func fallback(_ id: CGDirectDisplayID, _ reason: String) -> Job? {
         status[id] = "using overlay bar — \(reason)"
-        FileHandle.standardError.write(Data("[wallpaper] display \(id): fallback — \(reason)\n".utf8))
+        debugLog("[wallpaper] display \(id): fallback — \(reason)")
         needsOverlay.insert(id)
         return nil
     }

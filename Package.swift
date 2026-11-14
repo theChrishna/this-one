@@ -1,13 +1,11 @@
 // swift-tools-version:5.9
+// For `swift build` / editors. Release builds (universal .app bundle) use ./build.sh.
 import PackageDescription
 
 let package = Package(
-    name: "NotchHider",
-    platforms: [.macOS(.v14)],
+    name: "BarTidy",
+    platforms: [.macOS(.v13)],
     targets: [
-        .executableTarget(
-            name: "NotchHider",
-            path: "Sources/NotchHider"
-        )
+        .executableTarget(name: "BarTidy", path: "Sources/BarTidy")
     ]
 )
