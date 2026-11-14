@@ -1,6 +1,6 @@
-# BarTidy
+# BarTidy Plus
 
-A tiny, fast menu bar utility for macOS 27, combining two tools in one app:
+A tiny, fast menu bar utility for macOS 27, combining two tools in one app (**BarTidy** + **NotchHider**):
 
 - **Menu bar declutterer**, built to feel exactly like Hidden Bar.
 - **Notch hider** (formerly the separate NotchHider app): paints the menu bar pure black so the notch on a MacBook blends in, with concave rounded corners under the bar so it looks like part of the bezel.
@@ -23,12 +23,24 @@ One menu bar arrow, one Preferences window (tabs **Menu Bar** and **Notch**), on
 
 ```bash
 ./build.sh
-open BarTidy.app
+open "build.noindex/BarTidy Plus.app"
 ```
 
-Requires the Xcode command line tools (`xcode-select --install`). The build is a universal binary for macOS 13 and later. `swift build` also works for development (see `Package.swift`). To keep it, move `BarTidy.app` to `/Applications` **before** turning on *Launch at login*, since the login item remembers where the app was.
+Requires the Xcode command line tools (`xcode-select --install`). The build is a universal binary for macOS 13 and later. `swift build` also works for development (see `Package.swift`). To keep it, copy it to `/Applications` **before** turning on *Launch at login*, since the login item remembers where the app was:
 
-**Coming from the separate NotchHider app:** BarTidy asks a running NotchHider to quit when it starts (NotchHider restores its wallpaper as it quits) and imports its settings once. You can then delete `NotchHider.app`.
+```bash
+rm -rf "/Applications/BarTidy Plus.app" && cp -R "build.noindex/BarTidy Plus.app" /Applications/
+```
+
+The build goes into `build.noindex/` because Spotlight and Launchpad skip `.noindex` folders, so the build copy never shows up as a second app.
+
+## Living next to the original apps
+
+BarTidy Plus has its own name and bundle ID (`com.krishna.bartidyplus`), so it can be installed alongside the original **BarTidy** (`com.krishna.bartidy`) and **NotchHider** (`com.example.NotchHider`).
+
+- **Settings:** on first launch it imports the original BarTidy's menu bar settings and NotchHider's notch settings, once. After that each app keeps its own settings.
+- **Running:** only one should run at a time, or you get two arrows, a ⌃⌥B clash and doubled black bars. When BarTidy Plus starts it asks a running BarTidy or NotchHider to quit (NotchHider restores its wallpaper as it quits). You can still open either original on its own after quitting BarTidy Plus.
+- **Login items:** if more than one app has *Launch at login* on, they all start and BarTidy Plus quits the others. Turn it off in the originals if you only want Plus.
 
 ## Preferences
 
@@ -95,9 +107,10 @@ Sources/BarTidy/
   Notch/                           NotchController, NotchPrefs, ScreenGeometry,
                                    WallpaperManager, OverlayManager, NotchSettingsView
 tools/                             make-icon.swift, notarize.sh
+build.sh                           universal "BarTidy Plus.app" in build.noindex/
 ```
 
-The git history of both original projects is kept: they were imported, then moved into this layout.
+The Swift module is still called `BarTidy`. The git history of both original projects is kept: they were imported, then moved into this layout.
 
 ## Notch verification checklist (manual)
 
@@ -129,7 +142,7 @@ Record outcomes in the table under [Known limitations](#known-limitations).
 3. Log in (with *Launch at login* on, BarTidy starts by itself). Confirm the band is regenerated.
 
 **Variant: login window with the band left in place.**
-1. With the band applied, run `pkill -9 BarTidy` (kills the app without restoring).
+1. With the band applied, run `pkill -9 BarTidyPlus` (kills the app without restoring).
 2. Log Out, check 2.3 (a–f) at the login window, log back in.
 3. Open BarTidy: the crash-recovery prompt should offer to restore the original. Accept it and confirm the original wallpaper returns.
 
@@ -170,17 +183,17 @@ Quit BarTidy, lock the screen once more and confirm there is no black strip left
 
 1. Right-click the arrow → Notch → **Restore original wallpaper** (this also turns *Hide the notch* off), or just **Quit**: both put the original wallpaper and options back and remove every overlay window.
 2. If the app crashed or was force-quit, open it again and choose **Restore original** in the prompt. Or set your wallpaper again in System Settings.
-3. Generated images live in `~/Library/Application Support/NotchHider/`; notch settings are the `notch.*` keys in `defaults read com.krishna.bartidy`.
+3. Generated images live in `~/Library/Application Support/NotchHider/`; notch settings are the `notch.*` keys in `defaults read com.krishna.bartidyplus`.
 
 ## Debugging
 
 ```bash
-defaults write com.krishna.bartidy debugLogging -bool YES     # or pass -debugLogging YES on the command line
-./BarTidy.app/Contents/MacOS/BarTidy        # logs item frames, state changes and notch geometry to the terminal
-log stream --predicate 'subsystem == "com.krishna.bartidy"'   # or watch the unified log
+defaults write com.krishna.bartidyplus debugLogging -bool YES     # or pass -debugLogging YES on the command line
+"build.noindex/BarTidy Plus.app/Contents/MacOS/BarTidyPlus"   # logs item frames, state changes and notch geometry
+log stream --predicate 'subsystem == "com.krishna.bartidyplus"'   # or watch the unified log
 ```
 
-With debug logging on, BarTidy also listens for these distributed notifications so it can be scripted while testing: `com.krishna.bartidy.toggle`, `.debugState` (object `collapsed`/`expanded`/`expandedAll`), `.debugLength` (object `<pt>` or `ah:<pt>`), `.debugLoginItem` (object `on`/`off`), and `.debugSnapshot` (object: output PDF path). Right-click → Notch → *Log screen geometry* prints the notch measurements.
+With debug logging on, BarTidy also listens for these distributed notifications so it can be scripted while testing: `com.krishna.bartidyplus.toggle`, `.debugState` (object `collapsed`/`expanded`/`expandedAll`), `.debugLength` (object `<pt>` or `ah:<pt>`), `.debugLoginItem` (object `on`/`off`), and `.debugSnapshot` (object: output PDF path). Right-click → Notch → *Log screen geometry* prints the notch measurements.
 
 ## Sharing it with other people
 
@@ -195,6 +208,6 @@ xcrun notarytool store-credentials bartidy --apple-id you@example.com --team-id 
 SIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)" tools/notarize.sh
 ```
 
-This builds with the hardened runtime, submits to Apple's notary service, staples the ticket, and writes `BarTidy-<version>.zip`. Put the zip on GitHub Releases.
+This builds with the hardened runtime, submits to Apple's notary service, staples the ticket, and writes `BarTidyPlus-<version>.zip`. Put the zip on GitHub Releases.
 
-**2. Free, unsigned.** Zip `BarTidy.app` (`ditto -c -k --keepParent BarTidy.app BarTidy.zip`) and share it. Recipients will get a "can't be verified" warning. They need to try opening it once, then go to **System Settings › Privacy & Security** and click **Open Anyway**. Or, if they trust you, run `xattr -dr com.apple.quarantine /Applications/BarTidy.app`.
+**2. Free, unsigned.** Zip the app (`ditto -c -k --keepParent "build.noindex/BarTidy Plus.app" BarTidyPlus.zip`) and share it. Recipients will get a "can't be verified" warning. They need to try opening it once, then go to **System Settings › Privacy & Security** and click **Open Anyway**. Or, if they trust you, run `xattr -dr com.apple.quarantine "/Applications/BarTidy Plus.app"`.

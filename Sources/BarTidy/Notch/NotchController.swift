@@ -71,7 +71,7 @@ final class NotchController: NSObject {
     private func offerRecovery() {
         NSApp.activate(ignoringOtherApps: true)
         let alert = NSAlert()
-        alert.messageText = "BarTidy didn't quit cleanly"
+        alert.messageText = "\(AppInfo.name) didn't quit cleanly"
         alert.informativeText = "A wallpaper with a black menu bar band is still set. Restore your original wallpaper now?"
         alert.addButton(withTitle: "Restore original")
         alert.addButton(withTitle: "Keep and continue")

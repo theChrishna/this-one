@@ -1,5 +1,5 @@
 #!/bin/bash
-# Builds, signs, notarizes and staples BarTidy.app, then zips it for sharing.
+# Builds, signs, notarizes and staples "BarTidy Plus.app", then zips it for sharing.
 #
 # One-time setup (needs a paid Apple Developer account):
 #   1. Create a "Developer ID Application" certificate (Xcode › Settings › Accounts › Manage Certificates).
@@ -15,14 +15,15 @@ cd "$(dirname "$0")/.."
 PROFILE="${NOTARY_PROFILE:-bartidy}"
 
 ./build.sh
-VERSION="$(/usr/libexec/PlistBuddy -c 'Print CFBundleShortVersionString' BarTidy.app/Contents/Info.plist)"
+APP="build.noindex/BarTidy Plus.app"
+VERSION="$(/usr/libexec/PlistBuddy -c 'Print CFBundleShortVersionString' "$APP/Contents/Info.plist")"
 
-ditto -c -k --keepParent BarTidy.app BarTidy-upload.zip
-xcrun notarytool submit BarTidy-upload.zip --keychain-profile "$PROFILE" --wait
-rm BarTidy-upload.zip
+ditto -c -k --keepParent "$APP" BarTidyPlus-upload.zip
+xcrun notarytool submit BarTidyPlus-upload.zip --keychain-profile "$PROFILE" --wait
+rm BarTidyPlus-upload.zip
 
-xcrun stapler staple BarTidy.app
-spctl --assess --type execute -vv BarTidy.app
+xcrun stapler staple "$APP"
+spctl --assess --type execute -vv "$APP"
 
-ditto -c -k --keepParent BarTidy.app "BarTidy-$VERSION.zip"
-echo "Ready to share: BarTidy-$VERSION.zip"
+ditto -c -k --keepParent "$APP" "BarTidyPlus-$VERSION.zip"
+echo "Ready to share: BarTidyPlus-$VERSION.zip"

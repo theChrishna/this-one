@@ -1,6 +1,15 @@
 import Cocoa
 import os
 
+// MARK: - App identity
+
+enum AppInfo {
+    /// "BarTidy Plus": shown in menus, alerts and window titles.
+    static let name = Bundle.main.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String ?? "BarTidy Plus"
+    /// The original, separate BarTidy app. This app replaces it while running and imports its settings once.
+    static let originalBarTidyID = "com.krishna.bartidy"
+}
+
 // MARK: - Preferences
 
 enum Pref {
@@ -33,11 +42,21 @@ enum Pref {
         get { (d.dictionary(forKey: "learnedHidingLengths") as? [String: Double])?.mapValues { CGFloat($0) } ?? [:] }
         set { d.set(newValue.mapValues { Double($0) }, forKey: "learnedHidingLengths") }
     }
-    /// `defaults write com.krishna.bartidy debugLogging -bool YES`
+    /// One-time import of the original BarTidy's settings, so switching apps keeps your choices.
+    static func importFromOriginalBarTidyIfNeeded() {
+        guard !d.bool(forKey: "importedFromBarTidy") else { return }
+        d.set(true, forKey: "importedFromBarTidy")
+        guard let old = d.persistentDomain(forName: AppInfo.originalBarTidyID) else { return }
+        for key in ["autoCollapseDelay", "alwaysHiddenEnabled", "showSeparator", "learnedHidingLengths"] {
+            if let value = old[key] { d.set(value, forKey: key) }
+        }
+    }
+
+    /// `defaults write com.krishna.bartidyplus debugLogging -bool YES`
     static var debugLogging: Bool { d.bool(forKey: "debugLogging") }
 }
 
-private let logger = Logger(subsystem: "com.krishna.bartidy", category: "bar")
+private let logger = Logger(subsystem: "com.krishna.bartidyplus", category: "bar")
 
 func debugLog(_ message: @autoclosure () -> String) {
     guard Pref.debugLogging else { return }

@@ -6,3 +6,4 @@
 .swiftpm/
 BarTidy.app/
 build/
+build.noindex/

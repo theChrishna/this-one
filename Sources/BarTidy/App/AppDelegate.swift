@@ -11,7 +11,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let notch = NotchController()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        Pref.importFromOriginalBarTidyIfNeeded()
         Pref.registerDefaults()
+        // The original BarTidy would add a second arrow and fight over ⌃⌥B; ask it to quit.
+        // (A running NotchHider is handled the same way by NotchController.)
+        for other in NSRunningApplication.runningApplications(withBundleIdentifier: AppInfo.originalBarTidyID)
+        where other != .current {
+            other.terminate()
+        }
         bar = MenuBarController()
         bar.onShowPreferences = { [weak self] in self?.showPreferences() }
         bar.extraMenuItems = { [weak self] in self.map { [$0.notch.makeMenuItem()] } ?? [] }
@@ -20,15 +27,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         hotKey = HotKey(keyCode: kVK_ANSI_B, modifiers: controlKey | optionKey) { [weak self] in
             self?.bar.toggleHidden()
         }
-        if hotKey == nil { NSLog("BarTidy: could not register ⌃⌥B (already taken by another app?)") }
+        if hotKey == nil { NSLog("\(AppInfo.name): could not register ⌃⌥B (already taken by another app?)") }
 
         if Pref.debugLogging {
             // Lets scripts drive the app while debugging.
             DistributedNotificationCenter.default().addObserver(
-                forName: .init("com.krishna.bartidy.toggle"), object: nil, queue: .main
+                forName: .init("com.krishna.bartidyplus.toggle"), object: nil, queue: .main
             ) { [weak self] _ in self?.bar.toggleHidden() }
             DistributedNotificationCenter.default().addObserver(
-                forName: .init("com.krishna.bartidy.debugLength"), object: nil, queue: .main
+                forName: .init("com.krishna.bartidyplus.debugLength"), object: nil, queue: .main
             ) { [weak self] n in
                 // object: "<length>" for the separator, "ah:<length>" for the always-hidden one
                 guard let self, let arg = n.object as? String else { return }
@@ -40,21 +47,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self.bar.dumpFrames("debugLength \(l)")
             }
             DistributedNotificationCenter.default().addObserver(
-                forName: .init("com.krishna.bartidy.debugLoginItem"), object: nil, queue: .main
+                forName: .init("com.krishna.bartidyplus.debugLoginItem"), object: nil, queue: .main
             ) { n in
                 let on = (n.object as? String) == "on"
                 do { try LoginItem.set(on) } catch { debugLog("login item error: \(error)") }
                 debugLog("login item set \(on) -> status \(SMAppService.mainApp.status.rawValue) enabled=\(LoginItem.isEnabled) needsApproval=\(LoginItem.needsApproval)")
             }
             DistributedNotificationCenter.default().addObserver(
-                forName: .init("com.krishna.bartidy.debugState"), object: nil, queue: .main
+                forName: .init("com.krishna.bartidyplus.debugState"), object: nil, queue: .main
             ) { [weak self] n in
                 if let st = MenuBarController.State(rawValue: n.object as? String ?? "") {
                     self?.bar.apply(st, userInitiated: true)
                 }
             }
             DistributedNotificationCenter.default().addObserver(
-                forName: .init("com.krishna.bartidy.debugSnapshot"), object: nil, queue: .main
+                forName: .init("com.krishna.bartidyplus.debugSnapshot"), object: nil, queue: .main
             ) { [weak self] n in
                 if let path = n.object as? String { self?.snapshotPreferences(to: path) }
             }

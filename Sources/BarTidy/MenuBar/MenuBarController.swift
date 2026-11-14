@@ -62,13 +62,13 @@ final class MenuBarController: NSObject {
             b.target = self
             b.action = #selector(toggleClicked(_:))
             b.sendAction(on: [.leftMouseUp, .rightMouseUp])
-            b.setAccessibilityLabel("BarTidy")
+            b.setAccessibilityLabel(AppInfo.name)
             b.toolTip = "Click: show/hide • ⌥-click: also always-hidden • Right-click: menu • ⌃⌥B"
         }
         separator.button?.image = Icons.separator
-        separator.button?.setAccessibilityLabel("BarTidy separator")
+        separator.button?.setAccessibilityLabel("\(AppInfo.name) separator")
         alwaysHiddenSeparator.button?.image = Icons.alwaysHiddenSeparator
-        alwaysHiddenSeparator.button?.setAccessibilityLabel("BarTidy always-hidden separator")
+        alwaysHiddenSeparator.button?.setAccessibilityLabel("\(AppInfo.name) always-hidden separator")
 
         alwaysHiddenSeparator.isVisible = Pref.alwaysHiddenEnabled
         render()
@@ -164,7 +164,7 @@ final class MenuBarController: NSObject {
             extra.forEach(menu.addItem)
         }
         menu.addItem(.separator())
-        menu.addItem(NSMenuItem(title: "Quit BarTidy", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
+        menu.addItem(NSMenuItem(title: "Quit \(AppInfo.name)", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
         // Pop the menu up from the arrow directly. (Attaching it and calling performClick could also
         // deliver the toggle action, so a right-click would expand the hidden icons.)
         guard let button = toggle.button else { return }
@@ -287,8 +287,8 @@ final class MenuBarController: NSObject {
         warnedAboutRescue = true
         NSApp.activate(ignoringOtherApps: true)
         let alert = NSAlert()
-        alert.messageText = "BarTidy showed your menu bar icons again"
-        alert.informativeText = "Hiding was pushing BarTidy's own arrow off the menu bar. Hold ⌘ and drag the | separators so they sit to the left of the arrow (the arrow must be the right-most BarTidy item), then click the arrow to hide again. Automatic hiding stays off until you click the arrow."
+        alert.messageText = "\(AppInfo.name) showed your menu bar icons again"
+        alert.informativeText = "Hiding was pushing \(AppInfo.name)'s own arrow off the menu bar. Hold ⌘ and drag the | separators so they sit to the left of the arrow (the arrow must be the right-most \(AppInfo.name) item), then click the arrow to hide again. Automatic hiding stays off until you click the arrow."
         alert.runModal()
     }
 
@@ -342,7 +342,7 @@ final class MenuBarController: NSObject {
         NSApp.activate(ignoringOtherApps: true)
         let alert = NSAlert()
         alert.messageText = "The separator is on the wrong side"
-        alert.informativeText = "BarTidy hides the icons to the left of the | separator. Hold ⌘ and drag the separator so it sits to the left of the BarTidy arrow, then try again."
+        alert.informativeText = "\(AppInfo.name) hides the icons to the left of the | separator. Hold ⌘ and drag the separator so it sits to the left of the \(AppInfo.name) arrow, then try again."
         alert.runModal()
     }
 

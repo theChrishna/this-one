@@ -6,7 +6,7 @@ import SwiftUI
 
 final class PreferencesWindowController: NSWindowController, NSWindowDelegate {
     private let bar: MenuBarController
-    private let loginBox = NSButton(checkboxWithTitle: "Launch BarTidy at login", target: nil, action: nil)
+    private let loginBox = NSButton(checkboxWithTitle: "Launch \(AppInfo.name) at login", target: nil, action: nil)
     private let loginNote = NSTextField(labelWithString: "")
     private let alwaysHiddenBox = NSButton(checkboxWithTitle: "Enable always-hidden section", target: nil, action: nil)
     private let separatorBox = NSButton(checkboxWithTitle: "Show separator icons", target: nil, action: nil)
@@ -21,7 +21,7 @@ final class PreferencesWindowController: NSWindowController, NSWindowDelegate {
         self.bar = bar
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 420, height: 10),
                               styleMask: [.titled, .closable], backing: .buffered, defer: false)
-        window.title = "BarTidy Preferences"
+        window.title = "\(AppInfo.name) Preferences"
         window.isReleasedWhenClosed = false
         super.init(window: window)
         window.delegate = self
@@ -53,10 +53,10 @@ final class PreferencesWindowController: NSWindowController, NSWindowDelegate {
 
         // Footer: version on the left, Quit on the right.
         let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? ""
-        let versionLabel = NSTextField(labelWithString: "BarTidy \(version)")
+        let versionLabel = NSTextField(labelWithString: "\(AppInfo.name) \(version)")
         versionLabel.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
         versionLabel.textColor = .tertiaryLabelColor
-        let quitButton = NSButton(title: "Quit BarTidy", target: NSApp, action: #selector(NSApplication.terminate(_:)))
+        let quitButton = NSButton(title: "Quit \(AppInfo.name)", target: NSApp, action: #selector(NSApplication.terminate(_:)))
         quitButton.keyEquivalent = "q"
         quitButton.keyEquivalentModifierMask = .command
         let spacer = NSView()

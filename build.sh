@@ -1,5 +1,6 @@
 #!/bin/bash
-# Builds BarTidy.app (universal: Apple silicon + Intel).
+# Builds "BarTidy Plus.app" (universal: Apple silicon + Intel): BarTidy + NotchHider in one app.
+# Its own name and bundle ID, so it can be installed next to the original BarTidy and NotchHider.
 # Needs the Xcode command line tools: xcode-select --install
 #
 #   ./build.sh                     ad-hoc signed, for this Mac
@@ -8,7 +9,11 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-APP="BarTidy.app"
+# build.noindex/: Spotlight and Launchpad skip ".noindex" folders, so the build copy never shows up
+# next to the installed app.
+APP="build.noindex/BarTidy Plus.app"
+EXECUTABLE="BarTidyPlus"
+BUNDLE_ID="com.krishna.bartidyplus"
 VERSION="2.0"
 BUILD="$(git rev-list --count HEAD 2>/dev/null || echo 1)"
 MIN_MACOS="13.0"
@@ -16,6 +21,7 @@ TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
 rm -rf "$APP"
+mkdir -p build.noindex
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 
 SOURCES=()
@@ -23,7 +29,7 @@ while IFS= read -r f; do SOURCES+=("$f"); done < <(find Sources/BarTidy -name '*
 for arch in arm64 x86_64; do
   swiftc -O -target "$arch-apple-macos$MIN_MACOS" -module-name BarTidy -o "$TMP/BarTidy-$arch" "${SOURCES[@]}"
 done
-lipo -create "$TMP/BarTidy-arm64" "$TMP/BarTidy-x86_64" -output "$APP/Contents/MacOS/BarTidy"
+lipo -create "$TMP/BarTidy-arm64" "$TMP/BarTidy-x86_64" -output "$APP/Contents/MacOS/$EXECUTABLE"
 
 cp Resources/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
 
@@ -32,10 +38,10 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-  <key>CFBundleExecutable</key><string>BarTidy</string>
-  <key>CFBundleIdentifier</key><string>com.krishna.bartidy</string>
-  <key>CFBundleName</key><string>BarTidy</string>
-  <key>CFBundleDisplayName</key><string>BarTidy</string>
+  <key>CFBundleExecutable</key><string>$EXECUTABLE</string>
+  <key>CFBundleIdentifier</key><string>$BUNDLE_ID</string>
+  <key>CFBundleName</key><string>BarTidy Plus</string>
+  <key>CFBundleDisplayName</key><string>BarTidy Plus</string>
   <key>CFBundleIconFile</key><string>AppIcon</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleShortVersionString</key><string>$VERSION</string>
@@ -55,4 +61,4 @@ else
   codesign --force --sign - "$APP"   # ad-hoc: runs on this Mac only
 fi
 codesign --verify --strict "$APP"
-echo "Built $APP ($VERSION build $BUILD). Run: open $APP"
+echo "Built $APP ($VERSION build $BUILD). Run: open \"$APP\""
