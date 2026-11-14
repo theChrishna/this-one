@@ -139,6 +139,7 @@ final class MenuBarController: NSObject {
 
     @objc private func toggleClicked(_ sender: NSStatusBarButton) {
         guard let event = NSApp.currentEvent else { return }
+        debugLog("toggle clicked: event=\(event.type.rawValue) modifiers=\(event.modifierFlags.rawValue)")
         if event.type == .rightMouseUp || event.modifierFlags.contains(.control) {
             showMenu()
         } else if event.modifierFlags.contains(.option) {
@@ -164,10 +165,10 @@ final class MenuBarController: NSObject {
         }
         menu.addItem(.separator())
         menu.addItem(NSMenuItem(title: "Quit BarTidy", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
-        // Attach the menu only for this click so a normal left-click keeps toggling.
-        toggle.menu = menu
-        toggle.button?.performClick(nil)
-        toggle.menu = nil
+        // Pop the menu up from the arrow directly. (Attaching it and calling performClick could also
+        // deliver the toggle action, so a right-click would expand the hidden icons.)
+        guard let button = toggle.button else { return }
+        menu.popUp(positioning: nil, at: NSPoint(x: 0, y: button.bounds.height + 4), in: button)
     }
 
     @objc private func openPreferences() { onShowPreferences?() }
@@ -257,7 +258,10 @@ final class MenuBarController: NSObject {
         if Pref.debugLogging && UserDefaults.standard.bool(forKey: "debugFakeToggleHidden") { return false }
         guard let w = toggle.button?.window, w.frame.height > 0 else { return true }  // not laid out yet
         guard let screen = w.screen ?? NSScreen.main else { return false }
-        return screen.frame.insetBy(dx: -1, dy: -1).contains(w.frame)
+        // Only the horizontal position matters: status item windows can be taller than the menu bar
+        // (38pt windows in a 34pt bar at 1710x1107) and stick out above the screen while fully clickable.
+        let s = screen.frame
+        return w.frame.minX >= s.minX - 1 && w.frame.maxX <= s.maxX + 1 && w.frame.intersects(s)
     }
 
     /// If hiding ever takes the arrow itself off the menu bar (wrong order, a crowded
